@@ -1,3 +1,8 @@
+import os
+
+learning_rate = float(os.getenv("LEARNING_RATE", 0.01))  # default = 0.01
+print("Using learning rate:", learning_rate)
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 from app.model_utils import load_model, predict
