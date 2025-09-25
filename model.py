@@ -14,7 +14,76 @@ import time
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def init_arcee():
+def init_arcee_simple_fallback():
+    """Fallback: Try both external URLs and internal cluster IP with correct port"""
+    try:
+        logger.info("Trying simple direct API approach as fallback...")
+        import requests
+        
+        # Try both external URLs and internal cluster IP (from kubectl get services)
+        base_urls = [
+            "https://finops.gtoinnovations.com",
+            "https://cgisrfin-demo", 
+            "http://10.111.250.243:80",  # Internal cluster IP from kubectl get services
+            "http://10.254.0.25:8891"    # Pod IP with correct port from kubectl describe
+        ]
+        
+        for base_url in base_urls:
+            logger.info(f"Testing direct API access to: {base_url}")
+            # Try to find the correct API endpoint by testing runs endpoint
+            test_paths = [
+                "/api/v2/runs", "/api/v1/runs", "/runs",  # Direct paths
+                "/api/arcee/v2/runs", "/api/arcee/v1/runs", "/arcee/api/v1/runs"  # With arcee prefix
+            ]
+            for path in test_paths:
+                try:
+                    test_url = f"{base_url}{path}"
+                    logger.info(f"Testing endpoint: {test_url}")
+                    # Try a GET request to see if endpoint exists
+                    response = requests.get(test_url, timeout=10)
+                    logger.info(f"Response: {response.status_code}")
+                    if response.status_code in [200, 401, 403]:  # Endpoint exists, might need auth
+                        api_base = test_url.replace("/runs", "")
+                        logger.info(f"Found potential Arcee API at: {api_base}")
+                        return {"base_url": api_base, "session": requests.Session()}
+                except Exception as e:
+                    logger.debug(f"Endpoint {test_url} failed: {e}")
+                    continue
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Simple fallback failed: {e}")
+        return None
+
+def create_run_direct_api(api_info, run_name="iris_classification"):
+    """Create run using direct API calls"""
+    if not api_info:
+        return None
+        
+    try:
+        base_url = api_info["base_url"]
+        session = api_info["session"]
+        
+        # Try to create a run via direct API
+        create_url = f"{base_url}/runs"
+        payload = {
+            "name": run_name,
+            "project": "finops-ml"
+        }
+        
+        response = session.post(create_url, json=payload, timeout=10)
+        if response.status_code in [200, 201]:
+            run_data = response.json()
+            logger.info(f"Run created via direct API: {run_data}")
+            return run_data
+        else:
+            logger.warning(f"Direct API create failed: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Direct API run creation failed: {e}")
+        return None
     """Initialize Arcee client using the same method as bulldozer"""
     try:
         logger.info("Initializing Arcee client like bulldozer...")
@@ -41,12 +110,198 @@ def init_arcee():
         config_cl.wait_configured()
         logger.info("Config client initialized and configured")
         
-        # Initialize Arcee client exactly like bulldozer does
-        arcee_cl = ArceeClient(url=config_cl.arcee_url())
-        arcee_cl.secret = config_cl.cluster_secret()
+        # HARDCODED: Use external Arcee URL with correct port (8891 from pod description)
+        base_urls = [
+            "https://finops.gtoinnovations.com",
+            "https://cgisrfin-demo"
+        ]
+        
+        # Common API paths to try - now we know arcee runs on port 8891 internally
+        api_paths = [
+            "/api/arcee/v2",
+            "/api/arcee/v1", 
+            "/api/arcee",
+            "/arcee/api/v2",
+            "/arcee/api/v1",
+            "/arcee/api",
+            "/arcee"
+        ]
+        
+        hardcoded_arcee_url = None
+        for base_url in base_urls:
+            for api_path in api_paths:
+                test_url = f"{base_url}{api_path}"
+                logger.info(f"Testing Arcee API endpoint: {test_url}")
+                try:
+                    import requests
+                    # Try common health/info endpoints
+                    for endpoint in ["/health", "/info", "/version", ""]:
+                        try:
+                            response = requests.get(f"{test_url}{endpoint}", timeout=10)
+                            logger.info(f"Response from {test_url}{endpoint}: {response.status_code}")
+                            
+                            # Accept any response that's not 404 or 5xx
+                            if response.status_code not in [404, 500, 502, 503, 504]:
+                                hardcoded_arcee_url = test_url
+                                logger.info(f"Found working Arcee API at: {test_url} (status: {response.status_code})")
+                                break
+                        except Exception as e:
+                            logger.debug(f"Endpoint {test_url}{endpoint} failed: {e}")
+                            continue
+                    
+                    if hardcoded_arcee_url:
+                        break
+                        
+                except Exception as e:
+                    logger.debug(f"URL {test_url} failed: {e}")
+                    continue
+            
+            if hardcoded_arcee_url:
+                break
+        
+        if not hardcoded_arcee_url:
+            logger.warning("No working Arcee API endpoint found, using fallback")
+            hardcoded_arcee_url = "https://finops.gtoinnovations.com/api/arcee/v2"
+        
+        arcee_cl = ArceeClient(url=hardcoded_arcee_url)
+        
+        # Try to get cluster secret from config client
+        cluster_secret = None
+        try:
+            if config_cl:
+                cluster_secret = config_cl.cluster_secret()
+                logger.info("Retrieved cluster secret from config client")
+        except Exception as e:
+            logger.warning(f"Failed to get cluster secret from config: {e}")
+        
+        # Set authentication - try multiple approaches
+        if cluster_secret:
+            arcee_cl.secret = cluster_secret
+            logger.info(f"Using cluster secret for authentication: {cluster_secret[:5] if cluster_secret else 'None'}***")
+        else:
+            # Try environment variables as fallback
+            for token_var in ['CLUSTER_SECRET', 'ARCEE_TOKEN', 'ARCEE_SECRET']:
+                token = os.getenv(token_var)
+                if token:
+                    arcee_cl.secret = token
+                    logger.info(f"Using token from {token_var}: {token[:5]}***")
+                    break
+            else:
+                logger.warning("No authentication token found - proceeding without authentication")
+        
+        logger.info(f"Arcee client initialized with URL: {hardcoded_arcee_url}")
         
         cluster_secret = config_cl.cluster_secret()
         logger.info(f"Arcee client initialized with cluster secret (masked): {cluster_secret[:5] if cluster_secret else 'None'}***")
+        
+def init_arcee():
+    """Initialize Arcee client using the same method as bulldozer"""
+    try:
+        logger.info("Initializing Arcee client like bulldozer...")
+        
+        # Import the same clients bulldozer uses
+        from cgisrfin_client.config_client.client import Client as ConfigClient
+        from cgisrfin_client.arcee_client.client import Client as ArceeClient
+        
+        # Get ETCD connection info from environment (bulldozer sets these)
+        etcd_host = os.environ.get("HX_ETCD_HOST")
+        etcd_port = os.environ.get("HX_ETCD_PORT")
+        
+        if not etcd_host or not etcd_port:
+            logger.error("HX_ETCD_HOST or HX_ETCD_PORT not found in environment")
+            return None, None
+        
+        logger.info(f"Connecting to ETCD at {etcd_host}:{etcd_port}")
+        
+        # Initialize config client exactly like bulldozer does
+        config_cl = ConfigClient(
+            host=etcd_host,
+            port=int(etcd_port)
+        )
+        config_cl.wait_configured()
+        logger.info("Config client initialized and configured")
+        
+        # HARDCODED: Use external Arcee URL provided by TL
+        base_urls = [
+            "https://finops.gtoinnovations.com",
+            "https://cgisrfin-demo"
+        ]
+        
+        # Common API paths to try
+        api_paths = [
+            "/api/arcee/v2",
+            "/api/arcee/v1", 
+            "/api/arcee",
+            "/arcee/api/v2",
+            "/arcee/api/v1",
+            "/arcee/api",
+            "/arcee",
+            ""  # root path
+        ]
+        
+        hardcoded_arcee_url = None
+        for base_url in base_urls:
+            for api_path in api_paths:
+                test_url = f"{base_url}{api_path}"
+                logger.info(f"Testing Arcee API endpoint: {test_url}")
+                try:
+                    import requests
+                    # Try common health/info endpoints
+                    for endpoint in ["/health", "/info", "/version", ""]:
+                        try:
+                            response = requests.get(f"{test_url}{endpoint}", timeout=10)
+                            logger.info(f"Response from {test_url}{endpoint}: {response.status_code}")
+                            
+                            # Accept any response that's not 404 or 5xx
+                            if response.status_code not in [404, 500, 502, 503, 504]:
+                                hardcoded_arcee_url = test_url
+                                logger.info(f"Found working Arcee API at: {test_url} (status: {response.status_code})")
+                                break
+                        except Exception as e:
+                            logger.debug(f"Endpoint {test_url}{endpoint} failed: {e}")
+                            continue
+                    
+                    if hardcoded_arcee_url:
+                        break
+                        
+                except Exception as e:
+                    logger.debug(f"URL {test_url} failed: {e}")
+                    continue
+            
+            if hardcoded_arcee_url:
+                break
+        
+        if not hardcoded_arcee_url:
+            logger.warning("No working Arcee API endpoint found, using fallback")
+            hardcoded_arcee_url = "https://finops.gtoinnovations.com/api/arcee/v2"
+        
+        arcee_cl = ArceeClient(url=hardcoded_arcee_url)
+        
+        # Try to get cluster secret from config client
+        cluster_secret = None
+        try:
+            if config_cl:
+                cluster_secret = config_cl.cluster_secret()
+                logger.info("Retrieved cluster secret from config client")
+        except Exception as e:
+            logger.warning(f"Failed to get cluster secret from config: {e}")
+        
+        # Set authentication - try multiple approaches
+        if cluster_secret:
+            arcee_cl.secret = cluster_secret
+            logger.info(f"Using cluster secret for authentication: {cluster_secret[:5] if cluster_secret else 'None'}***")
+        else:
+            # Try environment variables as fallback
+            for token_var in ['CLUSTER_SECRET', 'ARCEE_TOKEN', 'ARCEE_SECRET']:
+                token = os.getenv(token_var)
+                if token:
+                    arcee_cl.secret = token
+                    logger.info(f"Using token from {token_var}: {token[:5]}***")
+                    break
+            else:
+                logger.warning("No authentication token found - proceeding without authentication")
+        
+        logger.info(f"Arcee client initialized with URL: {hardcoded_arcee_url}")
         
         return arcee_cl, config_cl
         
@@ -263,19 +518,27 @@ def main():
     
     # Initialize Arcee client
     arcee_client, config_client = init_arcee()
+    run = None
+    api_info = None
     
     if arcee_client:
         logger.info("Arcee client initialized successfully")
-        
         # Create Arcee run
         run = create_arcee_run(arcee_client, "iris_classification")
         if run:
             logger.info(f"Arcee run created: {run}")
         else:
-            logger.warning("Failed to create Arcee run, continuing without it")
-    else:
-        logger.warning("Arcee client not available, running without integration")
-        run = None
+            logger.warning("Failed to create Arcee run via client, trying direct API...")
+    
+    # If client approach failed, try direct API
+    if not run:
+        api_info = init_arcee_simple_fallback()
+        if api_info:
+            run = create_run_direct_api(api_info, "iris_classification")
+            logger.info(f"Direct API run created: {run}")
+    
+    if not run:
+        logger.warning("All Arcee integration methods failed, continuing without Arcee")
     
     try:
         # Train model
