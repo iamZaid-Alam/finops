@@ -3,4 +3,10 @@ uvicorn
 pandas
 scikit-learn
 joblib
-arcee
+numpy
+requests
+
+cgisrfin-client
+
+matplotlib
+seaborn
