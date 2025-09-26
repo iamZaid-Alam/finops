@@ -10,9 +10,33 @@ import logging
 import traceback
 import time
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Configure logging to multiple outputs
+import logging.handlers
+
+# Create logs directory
+os.makedirs('/tmp/logs', exist_ok=True)
+
+# Configure logging to both console and file
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        logging.FileHandler('/tmp/logs/model.log'),  # File output
+        logging.handlers.SysLogHandler(address='/dev/log')  # System log
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# Also create a simple text log file
+def write_log(message):
+    with open('/tmp/model_simple.log', 'a') as f:
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {message}\n")
+        f.flush()
+
+# Log script start
+write_log("MODEL.PY SCRIPT STARTED")
+logger.info("Model script starting with enhanced logging")
 
 def init_arcee_simple_fallback():
     """Fallback: Try both external URLs and internal cluster IP with correct port"""
@@ -512,40 +536,52 @@ def train_model():
 
 def main():
     """Main function"""
+    write_log("MAIN FUNCTION STARTED")
     logger.info("="*60)
     logger.info("STARTING IRIS CLASSIFICATION WITH ARCEE INTEGRATION")
     logger.info("="*60)
     
+    write_log("Initializing Arcee client...")
     # Initialize Arcee client
     arcee_client, config_client = init_arcee()
     run = None
     api_info = None
     
     if arcee_client:
+        write_log("Arcee client initialized successfully")
         logger.info("Arcee client initialized successfully")
         # Create Arcee run
         run = create_arcee_run(arcee_client, "iris_classification")
         if run:
+            write_log(f"Arcee run created: {run}")
             logger.info(f"Arcee run created: {run}")
         else:
+            write_log("Failed to create Arcee run via client, trying direct API...")
             logger.warning("Failed to create Arcee run via client, trying direct API...")
     
     # If client approach failed, try direct API
     if not run:
+        write_log("Trying direct API approach...")
         api_info = init_arcee_simple_fallback()
         if api_info:
             run = create_run_direct_api(api_info, "iris_classification")
+            write_log(f"Direct API run created: {run}")
             logger.info(f"Direct API run created: {run}")
     
     if not run:
+        write_log("All Arcee integration methods failed, continuing without Arcee")
         logger.warning("All Arcee integration methods failed, continuing without Arcee")
     
     try:
+        write_log("Starting ML training...")
         # Train model
         params, metrics, model_path = train_model()
         
+        write_log(f"Training completed with accuracy: {metrics['accuracy']:.4f}")
+        
         # Log to Arcee if available
         if arcee_client and run:
+            write_log("Logging results to Arcee...")
             log_to_arcee(arcee_client, run, params, metrics)
             finish_arcee_run(arcee_client, run)
         
@@ -556,10 +592,13 @@ def main():
         logger.info(f"Model saved to: {model_path}")
         logger.info("="*60)
         
+        write_log("SCRIPT COMPLETED SUCCESSFULLY!")
         return True
         
     except Exception as e:
-        logger.error(f"Training failed: {e}")
+        error_msg = f"Training failed: {e}"
+        write_log(error_msg)
+        logger.error(error_msg)
         traceback.print_exc()
         
         # Try to mark run as failed in Arcee
@@ -572,6 +611,7 @@ def main():
             except:
                 pass
         
+        write_log("SCRIPT FAILED!")
         return False
 
 if __name__ == "__main__":
